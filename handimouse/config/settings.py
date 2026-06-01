@@ -20,7 +20,7 @@ class CameraConfig:
     device_index: int = 0
     target_width: int = 640
     target_height: int = 480
-    frame_margin: float = 0.1
+    frame_margin: float = 0.25
 
 
 @dataclass
@@ -32,12 +32,14 @@ class TrackerConfig:
 
 @dataclass
 class GestureConfig:
-    pinch_threshold: float = 0.15
+    pinch_threshold: float = 0.15           # thumb -> ring finger (left click)
+    right_click_threshold: float = 0.15     # thumb -> middle finger (right click)
     scroll_sensitivity: float = 0.05
     debounce_frames: int = 3
     click_cooldown: float = 0.35
+    double_click_window: float = 0.40
     scroll_cooldown: float = 0.12
-    drag_hold_frames: int = 6
+    drag_hold_frames: int = 8
     min_tracking_confidence: float = 0.65
 
 
@@ -45,7 +47,8 @@ class GestureConfig:
 class SafetyConfig:
     max_jump_fraction: float = 0.30
     max_rejected_frames: int = 3
-    fist_frames_threshold: int = 15
+    fist_frames_threshold: int = 60
+    enable_fist_safety: bool = True
 
 
 @dataclass
@@ -115,7 +118,7 @@ class ConfigurationManager:
                 device_index=cam_data.get("device_index", 0),
                 target_width=cam_data.get("target_width", 640),
                 target_height=cam_data.get("target_height", 480),
-                frame_margin=cam_data.get("frame_margin", 0.1)
+                frame_margin=cam_data.get("frame_margin", 0.25)
             )
 
             track_data = data.get("tracker", {})
@@ -128,11 +131,13 @@ class ConfigurationManager:
             gest_data = data.get("gesture_engine", {})
             self.settings.gesture_engine = GestureConfig(
                 pinch_threshold=gest_data.get("pinch_threshold", 0.15),
+                right_click_threshold=gest_data.get("right_click_threshold", 0.15),
                 scroll_sensitivity=gest_data.get("scroll_sensitivity", 0.05),
                 debounce_frames=gest_data.get("debounce_frames", 3),
                 click_cooldown=gest_data.get("click_cooldown", 0.35),
+                double_click_window=gest_data.get("double_click_window", 0.40),
                 scroll_cooldown=gest_data.get("scroll_cooldown", 0.12),
-                drag_hold_frames=gest_data.get("drag_hold_frames", 6),
+                drag_hold_frames=gest_data.get("drag_hold_frames", 8),
                 min_tracking_confidence=gest_data.get("min_tracking_confidence", 0.65)
             )
 
@@ -140,7 +145,8 @@ class ConfigurationManager:
             self.settings.safety = SafetyConfig(
                 max_jump_fraction=safe_data.get("max_jump_fraction", 0.30),
                 max_rejected_frames=safe_data.get("max_rejected_frames", 3),
-                fist_frames_threshold=safe_data.get("fist_frames_threshold", 15)
+                fist_frames_threshold=safe_data.get("fist_frames_threshold", 60),
+                enable_fist_safety=safe_data.get("enable_fist_safety", True)
             )
 
             # Record file mtime upon successful loading

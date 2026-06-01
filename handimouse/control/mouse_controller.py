@@ -66,6 +66,11 @@ class MouseController(ABC):
         ...
 
     @abstractmethod
+    def double_click(self) -> None:
+        """Execute a double left-click at the current cursor position."""
+        ...
+
+    @abstractmethod
     def click_right(self) -> None:
         """Execute a right mouse button click at the current cursor position."""
         ...

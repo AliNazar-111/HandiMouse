@@ -26,15 +26,17 @@ class SafetyInterlock:
        (all 5 fingers folded: fingers_up == [0, 0, 0, 0, 0]) for a sustained timeframe.
     """
 
-    def __init__(self, fist_frames_threshold: int = 15):
+    def __init__(self, fist_frames_threshold: int = 60, enable_fist_safety: bool = True):
         """
         Initialize Safety Interlock.
 
         Args:
             fist_frames_threshold: Number of consecutive frames the fist must be held
                                    to trigger the safety interlock.
+            enable_fist_safety: If True, allows emergency fist gestures to trigger suspension.
         """
         self.fist_frames_threshold = fist_frames_threshold
+        self.enable_fist_safety = enable_fist_safety
         
         # Interlock states
         self.interlocked = False
@@ -55,7 +57,7 @@ class SafetyInterlock:
                 logger.warning(f"Could not load Windows user32.dll for global key hook: {e}")
 
         logger.info(
-            f"SafetyInterlock ready | Fist threshold: {fist_frames_threshold} frames"
+            f"SafetyInterlock ready | Fist threshold: {fist_frames_threshold} frames | Enabled: {enable_fist_safety}"
         )
 
     def is_esc_pressed_globally(self) -> bool:
@@ -69,12 +71,14 @@ class SafetyInterlock:
             return bool(self._user32.GetAsyncKeyState(VK_ESCAPE) & 0x8000)
         return False
 
-    def process_safety(self, tracking_result: Dict[str, Any]) -> bool:
+    def process_safety(self, tracking_result: Dict[str, Any], suppress_fist: bool = False) -> bool:
         """
         Processes frame tracking telemetry to check for safety locks or hotkey triggers.
 
         Args:
             tracking_result: Output result from HandTracker.process_frame.
+            suppress_fist: When True (e.g. a pinch gesture is active), skip fist
+                           frame counting to avoid false emergency triggers.
 
         Returns:
             bool: True if the safety interlock is actively triggered/locked, False otherwise.
@@ -88,11 +92,11 @@ class SafetyInterlock:
             return True
 
         # 2. Gesture Interlock Check
-        if tracking_result.get("hand_detected", False):
+        if self.enable_fist_safety and tracking_result.get("hand_detected", False):
             fingers_up = tracking_result.get("fingers_up", [0, 0, 0, 0, 0])
             
             # Check if all fingers are folded down (Tight Fist)
-            if fingers_up == [0, 0, 0, 0, 0]:
+            if fingers_up == [0, 0, 0, 0, 0] and not suppress_fist:
                 self._consecutive_fist_frames += 1
                 
                 # Check if held for long enough to declare emergency

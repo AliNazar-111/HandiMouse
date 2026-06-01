@@ -1,292 +1,291 @@
 """
 Intelligence Layer: Heuristics-based gesture recognition engine.
-Translates normalized 3D hand landmarks and fingers-up binary arrays 
-into debounced, cooldown-validated mouse control event states.
+Translates normalized 3D hand landmarks into debounced, cooldown-validated
+mouse control event states.
+
+Gesture Mapping:
+  - MOVE_CURSOR  : Index finger extended only
+  - LEFT_CLICK   : Thumb tip  pinch to Ring finger tip  (landmark 4 -> 16)
+  - DRAG         : Sustained left-click pinch held beyond drag_hold_frames
+  - RIGHT_CLICK  : Thumb tip  pinch to Middle finger tip (landmark 4 -> 12)
+  - SCROLL       : All 4 fingers extended, move hand up/down
 """
 
 import collections
 import logging
 import math
 import time
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("handimouse.intelligence.gesture_engine")
 
 
 class GestureEngine:
     """
-    A robust rule-based gesture classifier incorporating a temporal state machine, 
-    debouncing, and refractory cooling periods to ensure smooth human-machine interactions.
+    A robust rule-based gesture classifier using direct 3D landmark distance
+    measurements for click/drag gestures (bypassing debouncing for zero lag),
+    and temporal debouncing for scroll/cursor mode transitions.
 
-    Optimizations & Mechanics:
-    1. Temporal Debouncing: Raw heuristics are noisy due to finger angles or camera occlusion. 
-       We track raw classifications over a rolling queue of `debounce_frames`. A transition is only 
-       confirmed if a gesture remains consistent, eliminating state flickering.
-    2. Decoupled Click vs. Drag: A pinch starts by registering a LEFT_CLICK event. 
-       If the pinch remains held beyond a set timeframe, the engine seamlessly transitions 
-       into DRAG_MODE. Releasing the pinch fires a DRAG_RELEASE trigger.
-    3. Dynamic Scroll Delta Accumulation: Scroll mode is engaged when fingers are open. 
-       Instead of mapping raw coordinates to instant triggers, it tracks vertical wrist deltas. 
-       Moving the hand up/down beyond a sensitivity threshold ticks SCROLL_UP/DOWN and resets the 
-       anchor, providing linear control.
+    Click & Drag use a "tap-on-release" design:
+      - Pinch press  -> no event yet
+      - Pinch release (short) -> CLICK fires
+      - Pinch hold (>drag_hold_frames) -> DRAG_START; release -> DRAG_RELEASE
     """
 
-    # Highly-tuned rule settings
+    # MediaPipe landmark indices
+    _THUMB_TIP   = 4
+    _MIDDLE_TIP  = 12   # Right-click pinch target
+    _RING_TIP    = 16   # Left-click / drag pinch target
+
+    # Default configuration
     DEFAULT_CONFIG = {
-        "pinch_threshold": 0.15,           # Distance thumb-to-index relative to hand_scale
-        "scroll_sensitivity": 0.05,        # Vertical displacement relative to hand_scale to trigger 1 tick
-        "debounce_frames": 3,              # History frames to confirm gesture transition
-        "click_cooldown": 0.35,            # Anti-double-trigger cooldown in seconds
-        "scroll_cooldown": 0.12,           # Telemetry rate-limit for scrolling in seconds
-        "drag_hold_frames": 6,             # Frame duration to transition from single click to sustained drag
-        "min_tracking_confidence": 0.65    # Minimum detection score to process input
+        "pinch_threshold":       0.15,   # Thumb-to-ring distance relative to hand_scale  -> left click
+        "right_click_threshold": 0.15,   # Thumb-to-middle distance relative to hand_scale -> right click
+        "scroll_sensitivity":    0.05,   # Vertical displacement relative to hand_scale to trigger 1 tick
+        "debounce_frames":       3,      # History frames to confirm scroll/cursor transition
+        "click_cooldown":        0.35,   # Minimum time between any two click events
+        "double_click_window":   0.40,   # Max gap between two left-pinches to register as double-click
+        "scroll_cooldown":       0.12,   # Rate-limit for scroll events in seconds
+        "drag_hold_frames":      8,      # Frames of sustained left-pinch before drag starts
+        "min_tracking_confidence": 0.65  # Minimum detection score to process input
     }
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize the Gesture Engine.
-
-        Args:
-            config: Optional custom parameter dictionary overrides.
-        """
         self.config = self.DEFAULT_CONFIG.copy()
         if config:
             self.config.update(config)
 
-        # State tracking variables
+        # Debounced state (only used for SCROLL / MOVE_CURSOR)
         self.active_gesture = "IDLE"
-        self.raw_history = collections.deque(maxlen=self.config["debounce_frames"])
+        self.raw_history = collections.deque(maxlen=max(1, self.config["debounce_frames"]))
 
-        # Click vs Drag states
-        self._pinch_frame_counter = 0
+        # Left-click / drag state
+        self._left_pinch_frames = 0
         self.in_drag_mode = False
-        self._left_click_locked = False
-        self._right_click_locked = False
-        
-        # Scroll anchor coordinates
+
+        # Right-click state
+        self._right_pinch_frames = 0
+        self._right_click_fired = False   # edge-trigger: fire once per pinch hold
+
+        # Double-click detection
+        self._last_left_click_time: float = 0.0
+
+        # Scroll anchor
         self.scroll_start_y: Optional[float] = None
-        
-        # Event rate-limiting (cooldown markers)
+
+        # Event cooldown timestamps
         self._last_event_times: Dict[str, float] = {
-            "LEFT_CLICK": 0.0,
+            "LEFT_CLICK":  0.0,
             "RIGHT_CLICK": 0.0,
-            "SCROLL_UP": 0.0,
-            "SCROLL_DOWN": 0.0
+            "SCROLL_UP":   0.0,
+            "SCROLL_DOWN": 0.0,
         }
 
         logger.info(
-            f"GestureEngine initialized | Debounce frames: {self.config['debounce_frames']} | "
-            f"Pinch threshold: {self.config['pinch_threshold']}"
+            f"GestureEngine initialized | "
+            f"Left-click: thumb->ring | Right-click: thumb->middle | "
+            f"Pinch threshold: {self.config['pinch_threshold']} | "
+            f"Double-click window: {self.config['double_click_window']}s"
         )
 
-    def _euclidean_distance(self, p1: Tuple[float, float, float], p2: Tuple[float, float, float]) -> float:
-        """Compute spatial Euclidean distance between two 3D coordinates."""
-        return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2 + (p1[2] - p2[2]) ** 2)
+    # ------------------------------------------------------------------
+    # Public properties
+    # ------------------------------------------------------------------
+
+    @property
+    def is_pinching(self) -> bool:
+        """True when any pinch gesture is currently held."""
+        return self._left_pinch_frames > 0 or self.in_drag_mode or self._right_pinch_frames > 0
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _dist(self, p1: Tuple, p2: Tuple) -> float:
+        """Euclidean distance between two 3D landmarks."""
+        return math.sqrt(sum((a - b) ** 2 for a, b in zip(p1, p2)))
 
     def _classify_raw_gesture(
-        self, 
-        landmarks: List[Tuple[float, float, float]], 
+        self,
+        landmarks: List[Tuple[float, float, float]],
         fingers_up: List[int],
-        hand_scale: float
+        hand_scale: float,
     ) -> Tuple[str, float]:
         """
-        Classifies the immediate frame's layout into a raw gesture before debouncing.
-
-        Returns:
-            Tuple[str, float]: (Raw gesture name string, gesture confidence score 0.0 - 1.0).
+        Classifies a single frame for debounced (scroll/cursor) states only.
+        Pinch-based clicks are handled directly in process_state.
         """
-        # 1. SCROLL MODE check: Index, Middle, Ring, and Pinky are fully extended
-        # E.g., [x, 1, 1, 1, 1] -> allows thumb to be closed or open for accessibility
+        # SCROLL: Index, Middle, Ring, Pinky all extended
         if fingers_up[1:] == [1, 1, 1, 1]:
-            # Scale-independent classification confidence
-            confidence = sum(fingers_up[1:]) / 4.0
-            return "SCROLL", confidence
+            return "SCROLL", 1.0
 
-        # 2. PINCH CHECK: Measure thumb tip (4) to index tip (8) distance
-        thumb_tip = landmarks[4]
-        index_tip = landmarks[8]
-        pinch_dist = self._euclidean_distance(thumb_tip, index_tip)
-        normalized_pinch = pinch_dist / hand_scale
-
-        if normalized_pinch < self.config["pinch_threshold"]:
-            # Proportional confidence mapping (closer pinch -> higher score)
-            confidence = 1.0 - (normalized_pinch / self.config["pinch_threshold"])
-            confidence = max(0.0, min(1.0, confidence))
-            
-            # Increment pinch holding counter to differentiate click vs drag
-            self._pinch_frame_counter += 1
-            if self._pinch_frame_counter >= self.config["drag_hold_frames"] or self.in_drag_mode:
-                return "DRAG_MODE", confidence
-            else:
-                return "LEFT_CLICK", confidence
-
-        # If pinch is released, reset the holding counter immediately
-        if not self.in_drag_mode:
-            self._pinch_frame_counter = 0
-
-        # 3. RIGHT_CLICK check: Index and Middle fingers extended up, Ring and Pinky folded down
-        # E.g., [x, 1, 1, 0, 0]
-        if fingers_up[1:3] == [1, 1] and fingers_up[3:] == [0, 0]:
-            return "RIGHT_CLICK", 1.0
-
-        # 4. MOVE_CURSOR check: Index finger only is extended up
-        # E.g., [x, 1, 0, 0, 0]
+        # MOVE_CURSOR: Index only extended
         if fingers_up[1] == 1 and fingers_up[2:] == [0, 0, 0]:
             return "MOVE_CURSOR", 1.0
 
-        # 5. Fallback IDLE state
         return "IDLE", 1.0
+
+    # ------------------------------------------------------------------
+    # Main processing
+    # ------------------------------------------------------------------
 
     def process_state(self, tracking_result: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Process the tracking result from the Vision Layer and map it to a debounced, 
-        cooldown-validated gesture event.
-
-        Args:
-            tracking_result: Output from HandTracker.process_frame.
+        Process a single frame's tracking result and return a gesture event.
 
         Returns:
-            Dict: Mapped gesture event details.
-                {
-                    "gesture": str,          # Mapped active gesture event string
-                    "confidence": float,     # Confidence score
-                    "event_trigger": str,    # Atomic events: "CLICK_LEFT", "CLICK_RIGHT", "DRAG_START", "DRAG_RELEASE", ""
-                    "scroll_tick": int       # Scroll tick offset: 1 (Up), -1 (Down), 0 (None)
-                }
+            {
+                "gesture":       str,   # Active gesture label
+                "confidence":    float,
+                "event_trigger": str,   # "CLICK_LEFT" | "DOUBLE_CLICK" | "CLICK_RIGHT"
+                                        # "DRAG_START" | "DRAG_RELEASE" | ""
+                "scroll_tick":   int    # 1 = up, -1 = down, 0 = none
+            }
         """
-        current_time = time.time()
-        
-        # Default fallback response
-        idle_event = {
-            "gesture": "IDLE",
-            "confidence": 1.0,
+        now = time.time()
+
+        idle_event: Dict[str, Any] = {
+            "gesture":       "IDLE",
+            "confidence":    1.0,
             "event_trigger": "",
-            "scroll_tick": 0
+            "scroll_tick":   0,
         }
 
-        # Safe guard checks
-        if not tracking_result["hand_detected"] or tracking_result["confidence"] < self.config["min_tracking_confidence"]:
-            # If tracking drops out during a drag, ensure we emit a clean release trigger
+        # ── Guard: no hand detected ────────────────────────────────────
+        if (not tracking_result["hand_detected"] or
+                tracking_result["confidence"] < self.config["min_tracking_confidence"]):
             event_trigger = ""
             if self.in_drag_mode:
                 event_trigger = "DRAG_RELEASE"
                 self.in_drag_mode = False
-                self._pinch_frame_counter = 0
-            
+                self._left_pinch_frames = 0
+                logger.info("Gesture Engine: DRAG_RELEASE (tracking lost)")
             self.raw_history.clear()
             self.active_gesture = "IDLE"
             self.scroll_start_y = None
-            
+            self._right_pinch_frames = 0
+            self._right_click_fired = False
             if event_trigger:
                 idle_event["event_trigger"] = event_trigger
             return idle_event
 
-        landmarks = tracking_result["landmarks"]
-        fingers_up = tracking_result["fingers_up"]
-        
-        # Calculate dynamic hand scale
-        wrist = landmarks[0]
-        middle_knuckle = landmarks[9]
-        hand_scale = self._euclidean_distance(wrist, middle_knuckle)
-        if hand_scale == 0.0:
-            hand_scale = 0.1
+        landmarks   = tracking_result["landmarks"]
+        fingers_up  = tracking_result["fingers_up"]
 
-        # 1. Get raw current frame classification
-        raw_gesture, confidence = self._classify_raw_gesture(landmarks, fingers_up, hand_scale)
-        self.raw_history.append(raw_gesture)
+        # Hand scale: wrist (0) to middle knuckle (9)
+        hand_scale = self._dist(landmarks[0], landmarks[9]) or 0.1
 
-        # 2. Debouncing State Decision
-        # Transition active state only if the raw gesture matches consistently over our history queue
+        event_trigger = ""
+        scroll_tick   = 0
+        confidence    = 1.0
+
+        # ── Debounce non-pinch gestures ────────────────────────────────
+        raw, confidence = self._classify_raw_gesture(landmarks, fingers_up, hand_scale)
+        self.raw_history.append(raw)
+
         if len(self.raw_history) == self.config["debounce_frames"]:
             most_common = collections.Counter(self.raw_history).most_common(1)[0][0]
-            # Ensure 100% agreement within history for state transitions (strict filter)
             if self.raw_history.count(most_common) == self.config["debounce_frames"]:
                 self.active_gesture = most_common
 
-        # 3. State Machine Output Translation
-        event_trigger = ""
-        scroll_tick = 0
-
-        # RESET scroll anchor if we are no longer actively scrolling
+        # Clear scroll anchor when not scrolling
         if self.active_gesture != "SCROLL":
             self.scroll_start_y = None
- 
-        # Unlock click states when gestures are released/changed
-        if self.active_gesture != "LEFT_CLICK" and self.active_gesture != "DRAG_MODE":
-            self._left_click_locked = False
-            
-        if self.active_gesture != "RIGHT_CLICK":
-            self._right_click_locked = False
 
-        # -- GESTURE STATES ROUTING --
-        
-        if self.active_gesture == "LEFT_CLICK":
-            # Cooldown + Edge-Trigger filtering to prevent multi-firing
-            elapsed = current_time - self._last_event_times["LEFT_CLICK"]
-            if not self._left_click_locked and elapsed >= self.config["click_cooldown"]:
-                event_trigger = "CLICK_LEFT"
-                self._last_event_times["LEFT_CLICK"] = current_time
-                self._left_click_locked = True
-                logger.info("Gesture Engine Event Triggered: CLICK_LEFT")
-            # Override state display to keep tracking moving
-            self.active_gesture = "MOVE_CURSOR"
- 
-        elif self.active_gesture == "DRAG_MODE":
-            if not self.in_drag_mode:
-                event_trigger = "DRAG_START"
-                self.in_drag_mode = True
-                self._left_click_locked = True  # Pinch hold locks clicks
-                logger.info("Gesture Engine Event Triggered: DRAG_START")
- 
-        elif self.active_gesture == "RIGHT_CLICK":
-            elapsed = current_time - self._last_event_times["RIGHT_CLICK"]
-            if not self._right_click_locked and elapsed >= self.config["click_cooldown"]:
-                event_trigger = "CLICK_RIGHT"
-                self._last_event_times["RIGHT_CLICK"] = current_time
-                self._right_click_locked = True
-                logger.info("Gesture Engine Event Triggered: CLICK_RIGHT")
-            self.active_gesture = "MOVE_CURSOR"
+        # ── LEFT CLICK / DRAG interceptor (thumb -> ring tip) ──────────
+        thumb = landmarks[self._THUMB_TIP]
+        ring  = landmarks[self._RING_TIP]
+        norm_left = self._dist(thumb, ring) / hand_scale
+        left_pinching = norm_left < self.config["pinch_threshold"]
 
-        elif self.active_gesture == "SCROLL":
-            # Tracking point is the wrist (0)
+        if left_pinching:
+            self._left_pinch_frames += 1
+            self.active_gesture = "MOVE_CURSOR"   # keep cursor active during pinch
+
+            if self._left_pinch_frames >= self.config["drag_hold_frames"]:
+                self.active_gesture = "DRAG_MODE"
+                if not self.in_drag_mode:
+                    event_trigger = "DRAG_START"
+                    self.in_drag_mode = True
+                    logger.info("Gesture Engine Event Triggered: DRAG_START")
+        else:
+            if self.in_drag_mode:
+                event_trigger = "DRAG_RELEASE"
+                self.in_drag_mode = False
+                logger.info("Gesture Engine Event Triggered: DRAG_RELEASE")
+            elif self._left_pinch_frames > 0:
+                # Quick tap released → fire LEFT_CLICK or DOUBLE_CLICK
+                elapsed = now - self._last_event_times["LEFT_CLICK"]
+                if elapsed >= self.config["click_cooldown"]:
+                    time_since_last = now - self._last_left_click_time
+                    if time_since_last <= self.config["double_click_window"]:
+                        event_trigger = "DOUBLE_CLICK"
+                        self._last_left_click_time = 0.0
+                        logger.info("Gesture Engine Event Triggered: DOUBLE_CLICK")
+                    else:
+                        event_trigger = "CLICK_LEFT"
+                        self._last_left_click_time = now
+                        logger.info("Gesture Engine Event Triggered: CLICK_LEFT")
+                    self._last_event_times["LEFT_CLICK"] = now
+                self.active_gesture = "MOVE_CURSOR"
+            self._left_pinch_frames = 0
+
+        # ── RIGHT CLICK interceptor (thumb -> middle tip) ──────────────
+        # Only evaluate if we are NOT currently doing a left pinch/drag
+        if not left_pinching and not self.in_drag_mode:
+            middle = landmarks[self._MIDDLE_TIP]
+            norm_right = self._dist(thumb, middle) / hand_scale
+            right_pinching = norm_right < self.config["right_click_threshold"]
+
+            if right_pinching:
+                self._right_pinch_frames += 1
+                self.active_gesture = "MOVE_CURSOR"   # keep cursor active
+
+                # Edge-trigger on first frame of pinch (fire immediately on press)
+                if self._right_pinch_frames == 1 and not self._right_click_fired:
+                    elapsed = now - self._last_event_times["RIGHT_CLICK"]
+                    if elapsed >= self.config["click_cooldown"]:
+                        event_trigger = "CLICK_RIGHT"
+                        self._last_event_times["RIGHT_CLICK"] = now
+                        self._right_click_fired = True
+                        logger.info("Gesture Engine Event Triggered: CLICK_RIGHT")
+            else:
+                self._right_pinch_frames = 0
+                self._right_click_fired = False
+        else:
+            # During left pinch, reset right-click state
+            self._right_pinch_frames = 0
+            self._right_click_fired = False
+
+        # ── SCROLL processing ──────────────────────────────────────────
+        if (self.active_gesture == "SCROLL"
+                and not left_pinching
+                and not self.in_drag_mode):
             wrist_y = landmarks[0][1]
-            
             if self.scroll_start_y is None:
                 self.scroll_start_y = wrist_y
             else:
-                # Calculate normalized vertical displacement delta
-                # Note: MediaPipe coordinates increase downward, so positive delta means moving UP
                 delta_y = self.scroll_start_y - wrist_y
-                normalized_delta = delta_y / hand_scale
-                
-                # Check scroll rates
-                elapsed_scroll = current_time - max(
-                    self._last_event_times["SCROLL_UP"], 
+                norm_delta = delta_y / hand_scale
+                elapsed_scroll = now - max(
+                    self._last_event_times["SCROLL_UP"],
                     self._last_event_times["SCROLL_DOWN"]
                 )
-                
                 if elapsed_scroll >= self.config["scroll_cooldown"]:
-                    if normalized_delta > self.config["scroll_sensitivity"]:
-                        scroll_tick = 1  # SCROLL UP
-                        self._last_event_times["SCROLL_UP"] = current_time
-                        self.scroll_start_y = wrist_y  # Move anchor
+                    if norm_delta > self.config["scroll_sensitivity"]:
+                        scroll_tick = 1
+                        self._last_event_times["SCROLL_UP"] = now
+                        self.scroll_start_y = wrist_y
                         logger.debug("Gesture Engine Event: SCROLL_UP")
-                    elif normalized_delta < -self.config["scroll_sensitivity"]:
-                        scroll_tick = -1  # SCROLL DOWN
-                        self._last_event_times["SCROLL_DOWN"] = current_time
-                        self.scroll_start_y = wrist_y  # Move anchor
+                    elif norm_delta < -self.config["scroll_sensitivity"]:
+                        scroll_tick = -1
+                        self._last_event_times["SCROLL_DOWN"] = now
+                        self.scroll_start_y = wrist_y
                         logger.debug("Gesture Engine Event: SCROLL_DOWN")
 
-        # Handle DRAG_RELEASE if they opened their hand from drag mode
-        if self.in_drag_mode and self.active_gesture != "DRAG_MODE":
-            event_trigger = "DRAG_RELEASE"
-            self.in_drag_mode = False
-            self._pinch_frame_counter = 0
-            logger.info("Gesture Engine Event Triggered: DRAG_RELEASE")
-
         return {
-            "gesture": self.active_gesture,
-            "confidence": float(confidence),
+            "gesture":       self.active_gesture,
+            "confidence":    float(confidence),
             "event_trigger": event_trigger,
-            "scroll_tick": scroll_tick
+            "scroll_tick":   scroll_tick,
         }

@@ -45,6 +45,11 @@ class PyAutoGUIController(MouseController):
         pyautogui.click(button="left")
         logger.debug("PyAutoGUI: LEFT_CLICK executed.")
 
+    def double_click(self) -> None:
+        """Execute a double left-click at the current position."""
+        pyautogui.doubleClick(button="left")
+        logger.debug("PyAutoGUI: DOUBLE_CLICK executed.")
+
     def click_right(self) -> None:
         """Execute a right click at the current position."""
         pyautogui.click(button="right")

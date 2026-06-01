@@ -1,0 +1,29 @@
+{
+    "camera": {
+        "device_index": 0,
+        "target_width": 640,
+        "target_height": 480,
+        "frame_margin": 0.25
+    },
+    "tracker": {
+        "min_detection_confidence": 0.5,
+        "min_tracking_confidence": 0.5,
+        "dominant_hand_preference": "largest"
+    },
+    "gesture_engine": {
+        "pinch_threshold": 0.15,
+        "right_click_threshold": 0.15,
+        "scroll_sensitivity": 0.05,
+        "debounce_frames": 3,
+        "click_cooldown": 0.35,
+        "scroll_cooldown": 0.12,
+        "drag_hold_frames": 6,
+        "min_tracking_confidence": 0.65
+    },
+    "safety": {
+        "max_jump_fraction": 0.3,
+        "max_rejected_frames": 3,
+        "fist_frames_threshold": 60,
+        "enable_fist_safety": true
+    }
+}

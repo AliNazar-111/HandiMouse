@@ -90,14 +90,26 @@ class Win32MouseController(MouseController):
         self._send_input(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, dx=abs_x, dy=abs_y)
 
     def click_left(self) -> None:
-        """Fire a left mouse button down+up in a single atomic SendInput call."""
+        """Fire a left mouse button down+up with a 15ms hold gap to guarantee OS registration."""
+        import time
         self._send_input(MOUSEEVENTF_LEFTDOWN)
+        time.sleep(0.015)
         self._send_input(MOUSEEVENTF_LEFTUP)
         logger.debug("Win32: LEFT_CLICK fired.")
 
+    def double_click(self) -> None:
+        """Fire two left clicks with proper hold time and a 50ms interval between them."""
+        import time
+        self.click_left()
+        time.sleep(0.05)
+        self.click_left()
+        logger.debug("Win32: DOUBLE_CLICK fired.")
+
     def click_right(self) -> None:
-        """Fire a right mouse button down+up."""
+        """Fire a right mouse button down+up with a 15ms hold gap."""
+        import time
         self._send_input(MOUSEEVENTF_RIGHTDOWN)
+        time.sleep(0.015)
         self._send_input(MOUSEEVENTF_RIGHTUP)
         logger.debug("Win32: RIGHT_CLICK fired.")
 

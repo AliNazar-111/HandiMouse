@@ -160,6 +160,7 @@ def update_running_parameters(
 
     # 3. Update safety interlock limits
     safety_interlock.fist_frames_threshold = settings.safety.fist_frames_threshold
+    safety_interlock.enable_fist_safety = settings.safety.enable_fist_safety
     logger.info("[HOT-RELOAD] Updated SafetyInterlock timers.")
 
 
@@ -187,7 +188,8 @@ def main():
             max_rejected_frames=settings.safety.max_rejected_frames
         )
         safety_interlock = SafetyInterlock(
-            fist_frames_threshold=settings.safety.fist_frames_threshold
+            fist_frames_threshold=settings.safety.fist_frames_threshold,
+            enable_fist_safety=settings.safety.enable_fist_safety
         )
 
         # 4. Initialize Intelligence Layer
@@ -232,9 +234,9 @@ def main():
         logger.info("=" * 65)
         logger.info("GESTURE CONTROLS SHEET:")
         logger.info("  - Cursor Movement   -> Extend Index finger only")
-        logger.info("  - Left Click        -> Briefly pinch Thumb and Index Tip")
-        logger.info("  - Click & Drag      -> Sustained pinch of Thumb and Index Tip")
-        logger.info("  - Right Click       -> Extend Index and Middle fingers together")
+        logger.info("  - Left Click        -> Briefly pinch Thumb and Ring Tip")
+        logger.info("  - Click & Drag      -> Sustained pinch of Thumb and Ring Tip")
+        logger.info("  - Right Click       -> Briefly pinch Thumb and Middle Tip")
         logger.info("  - Scroll Up/Down    -> Extend 5 fingers & move hand vertically")
         logger.info("  - Emergency Freeze  -> Clench hand in a tight Fist for 0.5s")
         logger.info("  - System Exit       -> Press Keyboard 'ESC' key or close feed window")
@@ -274,7 +276,10 @@ def main():
             tracking_result = tracker.process_frame(frame)
 
             # 2. Safety Interlock checks (monitors fist gesture & Esc key)
-            is_suspended = safety_interlock.process_safety(tracking_result)
+            is_suspended = safety_interlock.process_safety(
+                tracking_result,
+                suppress_fist=gesture_engine.is_pinching
+            )
 
             # 3. Intelligence Layer processing
             gesture_result = gesture_engine.process_state(tracking_result)
@@ -320,6 +325,8 @@ def main():
                     # Fire click/drag events
                     if event_trigger == "CLICK_LEFT":
                         controller.click_left()
+                    elif event_trigger == "DOUBLE_CLICK":
+                        controller.double_click()
                     elif event_trigger == "CLICK_RIGHT":
                         controller.click_right()
                     elif event_trigger == "DRAG_START":
