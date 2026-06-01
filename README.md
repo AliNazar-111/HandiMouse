@@ -1,4 +1,4 @@
-# HandiMouse 🖐️🖱️
+# HandiMouse
 
 HandiMouse is a high-performance, real-time computer vision application that replaces a physical computer mouse with human hand gestures. 
 
@@ -6,7 +6,7 @@ The system is built on a highly modular, decoupled architecture using **Python**
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
 To ensure high responsiveness and maintain standard screen refreshes, HandiMouse decouples camera ingestion, vision analysis, gesture intelligence, and OS mouse events across separate executing threads:
 
@@ -20,7 +20,7 @@ To ensure high responsiveness and maintain standard screen refreshes, HandiMouse
 
 ---
 
-## ⚡ Non-Blocking Input Layer (Completed)
+## Non-Blocking Input Layer (Completed)
 
 The **Input Layer** and **Logging & Monitoring Layer** are fully implemented.
 
@@ -32,7 +32,7 @@ The **Input Layer** and **Logging & Monitoring Layer** are fully implemented.
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### 1. Installation
 Clone the repository and install the dependencies:
