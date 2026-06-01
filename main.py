@@ -395,4 +395,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[INFO] HandiMouse halted cleanly by user (Ctrl+C). Exiting.")
+        sys.exit(0)
+
