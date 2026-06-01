@@ -60,6 +60,8 @@ class GestureEngine:
         # Click vs Drag states
         self._pinch_frame_counter = 0
         self.in_drag_mode = False
+        self._left_click_locked = False
+        self._right_click_locked = False
         
         # Scroll anchor coordinates
         self.scroll_start_y: Optional[float] = None
@@ -208,30 +210,40 @@ class GestureEngine:
         # RESET scroll anchor if we are no longer actively scrolling
         if self.active_gesture != "SCROLL":
             self.scroll_start_y = None
+ 
+        # Unlock click states when gestures are released/changed
+        if self.active_gesture != "LEFT_CLICK" and self.active_gesture != "DRAG_MODE":
+            self._left_click_locked = False
+            
+        if self.active_gesture != "RIGHT_CLICK":
+            self._right_click_locked = False
 
         # -- GESTURE STATES ROUTING --
         
         if self.active_gesture == "LEFT_CLICK":
-            # Cooldown filtering to prevent multi-firing
+            # Cooldown + Edge-Trigger filtering to prevent multi-firing
             elapsed = current_time - self._last_event_times["LEFT_CLICK"]
-            if elapsed >= self.config["click_cooldown"]:
+            if not self._left_click_locked and elapsed >= self.config["click_cooldown"]:
                 event_trigger = "CLICK_LEFT"
                 self._last_event_times["LEFT_CLICK"] = current_time
+                self._left_click_locked = True
                 logger.info("Gesture Engine Event Triggered: CLICK_LEFT")
             # Override state display to keep tracking moving
             self.active_gesture = "MOVE_CURSOR"
-
+ 
         elif self.active_gesture == "DRAG_MODE":
             if not self.in_drag_mode:
                 event_trigger = "DRAG_START"
                 self.in_drag_mode = True
+                self._left_click_locked = True  # Pinch hold locks clicks
                 logger.info("Gesture Engine Event Triggered: DRAG_START")
-
+ 
         elif self.active_gesture == "RIGHT_CLICK":
             elapsed = current_time - self._last_event_times["RIGHT_CLICK"]
-            if elapsed >= self.config["click_cooldown"]:
+            if not self._right_click_locked and elapsed >= self.config["click_cooldown"]:
                 event_trigger = "CLICK_RIGHT"
                 self._last_event_times["RIGHT_CLICK"] = current_time
+                self._right_click_locked = True
                 logger.info("Gesture Engine Event Triggered: CLICK_RIGHT")
             self.active_gesture = "MOVE_CURSOR"
 

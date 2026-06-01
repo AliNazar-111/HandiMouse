@@ -105,11 +105,24 @@ class SafetyInterlock:
             else:
                 # Reset consecutive counter if fist is opened
                 self._consecutive_fist_frames = 0
+                
+                # Auto-recover from fist emergency stop if they open their hand
+                if self.interlocked and "Emergency Fist" in self.reason:
+                    logger.info("Fist opened. Automatically clearing safety interlock.")
+                    self.interlocked = False
+                    self.reason = ""
         else:
             # If tracking drops, decay the fist timer to avoid accidental triggers
             self._consecutive_fist_frames = max(0, self._consecutive_fist_frames - 1)
+            
+            # Auto-recover if the hand leaves the frame completely during a fist override
+            if self.interlocked and "Emergency Fist" in self.reason:
+                logger.info("Hand tracking lost. Automatically clearing safety interlock.")
+                self.interlocked = False
+                self.reason = ""
 
         return self.interlocked
+
 
     def reset(self) -> None:
         """Clears the safety interlock lock, returning the system to normal emulating."""
